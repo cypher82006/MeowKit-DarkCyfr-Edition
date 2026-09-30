@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "🔒 Security Vulnerability Report"
+    url: "https://github.com/cypher82006/MeowKit-DarkCyfr-Edition/security/advisories/new"
+    about: "Report a security flaw, sandbox escape, or sensitive vulnerability confidentially."
+  - name: "💬 Operator Discussions & Homelab QA"
+    url: "https://github.com/cypher82006/MeowKit-DarkCyfr-Edition/discussions"
+    about: "Ask questions, share hardware mods, and discuss payloads with the community."
