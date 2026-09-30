@@ -1,0 +1,9 @@
+{
+    "name": "lua",
+    "version": "5.4.7",
+    "description": "Lua 5.4.7 embedded scripting language for MeowKit",
+    "build": {
+        "includeDir": "src",
+        "srcDir": "src"
+    }
+}

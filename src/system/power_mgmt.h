@@ -101,12 +101,14 @@ void power_set_warn_cb(void (*cb)(int pct));
  */
 bool power_is_ready(void);
 
-/* ── 状态查询 ─────────────────────────────────────────── */
-int  power_battery_pct(void);           /* 0-100；保护窗口内若读到 0 则返回 100 占位 */
-bool power_is_charging(void);
-bool power_is_low_battery(void);        /* ≤ WARN_BAT_PCT 且未充电 */
-bool power_is_critical_battery(void);   /* ≤ CRIT_BAT_PCT 且未充电 */
-bool power_vbus_present(void);
+int   power_battery_pct(void);           /* 0-100；保护窗口内若读到 0 则返回 100 占位 */
+float power_battery_voltage(void);       /* 实际电池端电压 (V)，例如 4.18V */
+float power_battery_current_ma(void);    /* 实际充放电电流 (mA) */
+bool  power_is_charging(void);
+bool  power_is_full(void);               /* VBUS 插入且电压 ≥ 4.10V 且未在充电 */
+bool  power_is_low_battery(void);        /* ≤ WARN_BAT_PCT 且未充电 */
+bool  power_is_critical_battery(void);   /* ≤ CRIT_BAT_PCT 且未充电 */
+bool  power_vbus_present(void);
 
 #ifdef __cplusplus
 }

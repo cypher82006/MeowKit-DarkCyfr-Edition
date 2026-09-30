@@ -159,6 +159,22 @@ extern "C" int power_battery_pct(void)
     return pct;
 }
 
+extern "C" float power_battery_voltage(void)
+{
+    return s_pmu ? s_pmu->getBatVoltage() : 0.0f;
+}
+
+extern "C" float power_battery_current_ma(void)
+{
+    return s_pmu ? s_pmu->getBatCurrent() : 0.0f;
+}
+
+extern "C" bool power_is_full(void)
+{
+    if (!s_pmu) return false;
+    return s_pmu->isVBUSExist() && !s_pmu->isCharging() && (s_pmu->getBatVoltage() >= 4.10f);
+}
+
 extern "C" bool power_is_charging(void)
 {
     return s_pmu ? s_pmu->isCharging() : false;

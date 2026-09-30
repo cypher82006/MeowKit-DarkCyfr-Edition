@@ -1,0 +1,15 @@
+{
+    "name": "wasm3",
+    "version": "0.5.0",
+    "description": "Wasm3 WebAssembly runtime for MeowKit",
+    "build": {
+        "includeDir": "source",
+        "srcDir": "source",
+        "srcFilter": [
+            "+<*.c>",
+            "-<m3_api_uvwasi.c>",
+            "-<extensions/*>",
+            "-<extra/*>"
+        ]
+    }
+}

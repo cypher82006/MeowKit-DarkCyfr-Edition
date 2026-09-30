@@ -89,6 +89,7 @@ LV_IMG_DECLARE(ui_img_nfc_png);            // App 12 (stub)
 LV_IMG_DECLARE(ui_img_smarthome_png);      // App 13 (stub)
 LV_IMG_DECLARE(ui_img_webserial_png);      // App 14 (stub)
 LV_IMG_DECLARE(ui_img_aichat_png);         // App 15 (stub)
+LV_IMG_DECLARE(ui_img_game_png);           // App 11 SD Apps
 LV_IMG_DECLARE(ui_img_clock_bg_png);    // assets/clock bg.png
 LV_IMG_DECLARE(ui_img_week_bg_png);    // assets/week bg.png
 LV_IMG_DECLARE(ui_img_header_png);    // assets/header.png

@@ -43,6 +43,7 @@
  * ═══════════════════════════════════════════════════════
  */
 #include "launcher.h"
+#include <esp_heap_caps.h>
 #include "../app.h"
 #include "../../bsp/porting/lv_port_disp.h"
 #include "../../bsp/porting/lv_port_indev.h"
@@ -54,6 +55,7 @@
 #include "../../system/usb_msc.h"
 #include "../../system/usb_manager.h"
 #include "../../system/settings_bridge.h"  /* includes persist internally */
+#include "../../system/persist.h"
 #include "../../system/power_mgmt.h"
 #include "../../system/mk_events.h"
 #include "../../system/system_sound.h"
@@ -61,6 +63,7 @@
 #include <SD_MMC.h>
 #include <lvgl.h>
 #include <esp_system.h>
+#include <soc/rtc_cntl_reg.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -311,10 +314,58 @@ void Launcher::onLoop()
     /* Flush dirty settings to NVS after debounce — ~0 cost when clean */
     settings_tick();
 
+    /* Serial command listener for live Wi-Fi provisioning & remote flashing */
+    if (Serial.available()) {
+        String line = Serial.readStringUntil('\n');
+        line.trim();
+        if (line.equalsIgnoreCase("BOOTLOADER") || line.equalsIgnoreCase("FLASH") || 
+            line.equalsIgnoreCase("UPLOAD") || line.equalsIgnoreCase("REBOOT:BOOTLOADER")) {
+            Serial.println("[Launcher] Entering ROM Bootloader for upload...");
+            Serial.flush();
+            delay(100);
+            REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+            esp_restart();
+        } else if (line.equalsIgnoreCase("REBOOT") || line.equalsIgnoreCase("RESET")) {
+            Serial.println("[Launcher] Rebooting...");
+            Serial.flush();
+            delay(100);
+            esp_restart();
+        } else if (line.startsWith("WIFI:") || line.startsWith("SET_WIFI:")) {
+            int first_colon = line.indexOf(':');
+            int second_colon = line.indexOf(':', first_colon + 1);
+            if (second_colon > first_colon) {
+                String new_ssid = line.substring(first_colon + 1, second_colon);
+                String new_pass = line.substring(second_colon + 1);
+                new_ssid.trim();
+                new_pass.trim();
+                Serial.printf("[SerialCmd] Provisioning WiFi SSID='%s'\n", new_ssid.c_str());
+                ui_wifi_bridge_connect(new_ssid.c_str(), new_pass.c_str());
+            }
+        }
+    }
+
     if (!_app_running) {
         /* ── GUI state: LVGL active ── */
-        /* Drive LED animation (BREATHING / BLINK) — must tick every loop. */
-        _device->led.update();
+        /* Drive LED animation (BREATHING / BLINK) — only when screen is awake */
+        if (!s_screen_off) {
+            _device->led.update();
+        }
+
+        /* Dual-button emergency bootloader shortcut: Hold [A] + [B] for 2s */
+        static uint32_t ab_hold_start = 0;
+        if (digitalRead(HAL_PIN_BTN_A) == LOW && digitalRead(HAL_PIN_BTN_B) == LOW) {
+            if (ab_hold_start == 0) ab_hold_start = millis();
+            else if (millis() - ab_hold_start > 2000) {
+                Serial.println("[Launcher] A+B held: Rebooting to ROM Bootloader...");
+                if (!_device->speaker.isEnabled()) _device->speaker.begin();
+                _device->speaker.tone(1800, 150);
+                delay(200);
+                REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+                esp_restart();
+            }
+        } else {
+            ab_hold_start = 0;
+        }
 
         /* Poll physical buttons every loop so press edges aren't missed. */
         _device->button.update();
@@ -335,6 +386,8 @@ void Launcher::onLoop()
                     if (s_screen_off) {
                         _device->Lcd.setBrightness(
                             (uint8_t)(sys_get_brightness() * 255 / 100));
+                        _device->led.setBrightness(
+                            (uint8_t)(sys_get_led() * 255 / 100));
                         s_screen_off = false;
                     }
                     break;
@@ -350,7 +403,9 @@ void Launcher::onLoop()
             power_tick();
             updateStatusBar();
             /* LED state: only active after boot grace; setEffect called on change only */
-            _updateLed(_device, power_battery_pct(), power_is_charging());
+            if (!s_screen_off) {
+                _updateLed(_device, power_battery_pct(), power_is_charging());
+            }
 
             /* Screen off (user-configured display timeout)
              * Guard: don't dim while USB MSC is transferring files. */
@@ -359,8 +414,9 @@ void Launcher::onLoop()
             if (!s_screen_off && disp_to > 0 && idle_s >= (uint32_t)disp_to
                 && !usb_msc_is_active()) {
                 _device->Lcd.setBrightness(0);
+                _device->led.setBrightness(0);  /* Kill LEDs to save battery while sleeping */
                 s_screen_off = true;
-                Serial.printf("[Launcher] Screen off (idle %lus)\n",
+                Serial.printf("[Launcher] Screen off (idle %lus) - Power saved\n",
                               (unsigned long)idle_s);
             }
 
@@ -452,11 +508,37 @@ void Launcher::initSD()
     }
 
     uint64_t sizeMB = SD_MMC.cardSize() / (1024 * 1024);
-    Serial.printf("[Launcher] SD OK — %lluMB  Total: %lluMB  Used: %lluMB\n",
-                  (unsigned long long)sizeMB,
-                  (unsigned long long)(SD_MMC.totalBytes() / (1024 * 1024)),
-                  (unsigned long long)(SD_MMC.usedBytes()  / (1024 * 1024)));
+    Serial.printf("[Launcher] SD OK — %lluMB\n", (unsigned long long)sizeMB);
     _sd_ready = true;
+
+    /* Auto-load Wi-Fi credentials from /wifi.cfg on MicroSD if present */
+    if (SD_MMC.exists("/wifi.cfg")) {
+        File cfg = SD_MMC.open("/wifi.cfg", "r");
+        if (cfg) {
+            String cfg_ssid = "";
+            String cfg_pass = "";
+            while (cfg.available()) {
+                String line = cfg.readStringUntil('\n');
+                line.trim();
+                if (line.startsWith("#")) continue;
+                if (line.startsWith("SSID=") || line.startsWith("ssid=")) {
+                    cfg_ssid = line.substring(5);
+                    cfg_ssid.trim();
+                } else if (line.startsWith("PASSWORD=") || line.startsWith("password=") ||
+                           line.startsWith("PASS=") || line.startsWith("pass=")) {
+                    int eq = line.indexOf('=');
+                    cfg_pass = line.substring(eq + 1);
+                    cfg_pass.trim();
+                }
+            }
+            cfg.close();
+            if (cfg_ssid.length() > 0) {
+                Serial.printf("[Launcher] Loaded /wifi.cfg from SD: SSID='%s'\n", cfg_ssid.c_str());
+                persist_set_str(PKEY_WIFI_SSID, cfg_ssid.c_str());
+                persist_set_str(PKEY_WIFI_PASS, cfg_pass.c_str());
+            }
+        }
+    }
 }
 
 /* ── Install apps ──────────────────────────────────── */
@@ -525,6 +607,10 @@ void Launcher::returnToUI()
     }
     lv_timer_handler();
 
+    Serial.printf("[Launcher] Post-App Heap — SRAM: %u KB (Largest Blk: %u KB) | PSRAM: %u KB\n",
+                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+                  (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+                  (unsigned)((psramFound() ? heap_caps_get_free_size(MALLOC_CAP_SPIRAM) : 0) / 1024));
     Serial.println("[Launcher] Back to apps_menu (no rebuild)");
 }
 
@@ -691,6 +777,7 @@ void Launcher::handlePhysicalNav()
     power_reset_sleep_timer();
     if (s_screen_off) {
         _device->Lcd.setBrightness((uint8_t)(sys_get_brightness() * 255 / 100));
+        _device->led.setBrightness((uint8_t)(sys_get_led() * 255 / 100));
         s_screen_off = false;
     }
 

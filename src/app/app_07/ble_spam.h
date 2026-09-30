@@ -118,6 +118,7 @@ private:
     void _makePacketNameFlood(uint8_t* buf, uint8_t& len);
     void _makePacketLoveSpousePlay(uint8_t* buf, uint8_t& len);
     void _makePacketLoveSpouseStop(uint8_t* buf, uint8_t& len);
+    void _makePacketAppleFindMy(uint8_t* buf, uint8_t& len);
     void _makePacketKitchenSink(uint8_t* buf, uint8_t& len);
 
     /* ── BLE helpers ── */

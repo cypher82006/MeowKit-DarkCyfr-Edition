@@ -15,7 +15,7 @@
 /* ── LVGL icon declarations ── */
 #include "../ui/ui.h"
 
-/* ── Active native app headers (app_01 ~ app_09) ── */
+/* ── Active native app headers (app_01 ~ app_10) ── */
 #include "app_01/dino.h"        /* Dino         */
 #include "app_02/matrix_rain.h" /* Matrix Rain  */
 #include "app_03/vu_meter.h"    /* VU Meter     */
@@ -25,6 +25,8 @@
 #include "app_07/ble_spam.h"    /* BLE Spam     */
 #include "app_08/badusb.h"      /* Bad USB      */
 #include "app_09/infrared.h"    /* Infrared     */
+#include "app_10/toolbox.h"     /* Toolbox      */
+#include "app_11/app_loader.h"  /* SD Apps      */
 
 #include <mooncake.h>
 #include <memory>
@@ -35,7 +37,7 @@
  */
 inline void registerAllApps(mooncake::Mooncake& mc, DEVICES* dev)
 {
-    /* Menu visual order: left → right, top → bottom (app_01 … app_09) */
+    /* Menu visual order: left → right, top → bottom (app_01 … app_11) */
     mc.installApp(std::make_unique<MOONCAKE::APPS::App01>(dev));     /* app_01  Dino         */
     mc.installApp(std::make_unique<MOONCAKE::APPS::App02>(dev));     /* app_02  Matrix Rain  */
     mc.installApp(std::make_unique<MOONCAKE::APPS::App03>(dev));     /* app_03  VU Meter     */
@@ -45,6 +47,8 @@ inline void registerAllApps(mooncake::Mooncake& mc, DEVICES* dev)
     mc.installApp(std::make_unique<MOONCAKE::APPS::App07>(dev));     /* app_07  BLE Spam     */
     mc.installApp(std::make_unique<MOONCAKE::APPS::AppBadUSB>(dev)); /* app_08  Bad USB      */
     mc.installApp(std::make_unique<MOONCAKE::APPS::App09>(dev));     /* app_09  Infrared     */
+    mc.installApp(std::make_unique<MOONCAKE::APPS::AppToolbox>(dev));/* app_10  Toolbox      */
+    mc.installApp(std::make_unique<MOONCAKE::APPS::AppLoader>(dev)); /* app_11  SD Apps      */
 }
 
 /**
@@ -54,15 +58,17 @@ inline void registerAllApps(mooncake::Mooncake& mc, DEVICES* dev)
  * Rule: icon[N] must correspond to the Nth installApp() call in registerAllApps().
  */
 static const void* const APP_BUILTIN_ICONS[] = {
-    &ui_img_dino_png,        /* app_01  Dino        */
-    &ui_img_matrix_rain_png, /* app_02  Matrix Rain */
-    &ui_img_vu_meter_png,    /* app_03  VU Meter    */
-    &ui_img_retro_tv_png,    /* app_04  Retro TV    */
-    &ui_img_pc_montior_png,  /* app_05  PC Monitor  */
-    &ui_img_air_mouse_png,   /* app_06  Air Mouse   */
-    &ui_img_ble_spam_png,    /* app_07  BLE Spam    */
-    &ui_img_badusb_png,      /* app_08  Bad USB     */
-    &ui_img_infrared_png,    /* app_09  Infrared    */
+    &ui_img_dino_png,              /* app_01  Dino        */
+    &ui_img_matrix_rain_png,       /* app_02  Matrix Rain */
+    &ui_img_vu_meter_png,          /* app_03  VU Meter    */
+    &ui_img_retro_tv_png,          /* app_04  Retro TV    */
+    &ui_img_pc_montior_png,        /* app_05  PC Monitor  */
+    &ui_img_air_mouse_png,         /* app_06  Air Mouse   */
+    &ui_img_ble_spam_png,          /* app_07  BLE Spam    */
+    &ui_img_badusb_png,            /* app_08  Bad USB     */
+    &ui_img_infrared_png,          /* app_09  Infrared    */
+    &ui_img_detailed_settings_png, /* app_10  Toolbox     */
+    &ui_img_game_png,              /* app_11  SD Apps     */
 };
 static const int APP_BUILTIN_ICONS_COUNT =
     (int)(sizeof(APP_BUILTIN_ICONS) / sizeof(APP_BUILTIN_ICONS[0]));

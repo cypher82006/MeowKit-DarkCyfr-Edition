@@ -66,6 +66,7 @@ static void _wifi_event(WiFiEvent_t event, WiFiEventInfo_t /*info*/)
 
         case ARDUINO_EVENT_WIFI_STA_GOT_IP:
             s_status = WIFI_BRIDGE_CONNECTED;
+            WiFi.setSleep(true); /* Modem sleep: radio sleeps between DTIM beacons (~20mA vs ~180mA) */
             {
                 String ssid = WiFi.SSID();
                 String ip   = WiFi.localIP().toString();
@@ -164,12 +165,15 @@ void ui_wifi_bridge_init(void)
 
     WiFi.onEvent(_wifi_event);
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(true);
     WiFi.setAutoReconnect(false);   /* we manage reconnect explicitly */
 
     char ssid[33] = {};
     char pass[65] = {};
     persist_get_str(kKeySsid, ssid, sizeof(ssid), "");
     persist_get_str(kKeyPass, pass, sizeof(pass), "");
+
+    /* If SSID is stored in NVS, auto-connect on boot */
     if (ssid[0] != '\0') {
         Serial.printf("[wifi] Auto-connect → %s\n", ssid);
         s_status = WIFI_BRIDGE_CONNECTING;

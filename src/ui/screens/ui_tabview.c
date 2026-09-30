@@ -6,6 +6,7 @@
 #include "../ui.h"
 #include "../ui_sd_bridge.h"
 #include "../ui_wifi_bridge.h"
+#include "../ui_rtc_bridge.h"
 #include "../../system/settings_bridge.h"
 #include "../../system/persist.h"
 #include <time.h>
@@ -15,6 +16,7 @@
 #include "../../ui/screens/ui_set_date.h"
 #include "../../ui/screens/ui_set_time.h"
 #include <nvs.h>
+#include <soc/rtc_cntl_reg.h>
 
 // ── Color palette ─────────────────────────────────────────────────────────
 #define TV_BG      0x0A0B09
@@ -75,22 +77,42 @@ static void _sys_bat_refresh(lv_timer_t * t)
     (void)t;
     if (!s_sys_bat_pct_lbl || !s_sys_bat_status || !s_sys_bat_fill) return;
 
-    int  pct      = power_battery_pct();
-    bool charging = power_is_charging();
+    int   pct      = power_battery_pct();
+    bool  charging = power_is_charging();
+    bool  vbus     = power_vbus_present();
+    float volt     = power_battery_voltage();
 
-    char buf[8];
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+
+    char buf[12];
     lv_snprintf(buf, sizeof(buf), "%d%%", pct);
     lv_label_set_text(s_sys_bat_pct_lbl, buf);
 
     lv_obj_set_style_text_color(s_sys_bat_pct_lbl, lv_color_white(), 0);
-    lv_label_set_text(s_sys_bat_status, charging ? "charging" : "discharging");
+
+    char stat_buf[32];
+    if (vbus) {
+        if (charging) {
+            lv_snprintf(stat_buf, sizeof(stat_buf), "%.2fV charging", volt);
+        } else if (volt >= 4.05f || pct >= 95) {
+            lv_snprintf(stat_buf, sizeof(stat_buf), "%.2fV full", volt);
+        } else {
+            lv_snprintf(stat_buf, sizeof(stat_buf), "%.2fV connected", volt);
+        }
+    } else {
+        lv_snprintf(stat_buf, sizeof(stat_buf), "%.2fV discharging", volt);
+    }
+    lv_label_set_text(s_sys_bat_status, stat_buf);
 
     uint32_t bar_clr = charging                    ? 0x00CC00u
+                     : (vbus && volt >= 4.05f)     ? 0x00CC00u
                      : (pct <= POWER_CRIT_BAT_PCT) ? TV_DANGER
                      : (pct <= POWER_WARN_BAT_PCT) ? TV_ORANGE
                      :                               TV_LIME;
     int fw = pct * 36 / 100;
     if (fw < 1) fw = 1;
+    if (fw > 36) fw = 36;
     lv_obj_set_width(s_sys_bat_fill, fw);
     lv_obj_set_style_bg_color(s_sys_bat_fill, lv_color_hex(bar_clr), 0);
 }
@@ -99,14 +121,26 @@ static void tab_time_refresh(lv_timer_t * t)
 {
     (void)t;
     if(!s_lbl_date || !s_lbl_time_str) return;
-    time_t now = time(NULL);
-    struct tm * ti = localtime(&now);
-    if(!ti) return;
+
     static const char * const wd[7] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
-    lv_label_set_text_fmt(s_lbl_date,     "%02d / %02d / %04d",
-                          ti->tm_mon + 1, ti->tm_mday, ti->tm_year + 1900);
-    lv_label_set_text_fmt(s_lbl_time_str, "%s  %02d:%02d",
-                          wd[ti->tm_wday], ti->tm_hour, ti->tm_min);
+    uint16_t year;
+    uint8_t month, day, weekday, hour, minute, second;
+
+    if (ui_rtc_bridge_get(&year, &month, &day, &weekday, &hour, &minute, &second)) {
+        lv_label_set_text_fmt(s_lbl_date, "%02d / %02d / %04d", month, day, year);
+        const char * wday_str = (weekday < 7) ? wd[weekday] : "---";
+        lv_label_set_text_fmt(s_lbl_time_str, "%s  %02d:%02d", wday_str, hour, minute);
+    } else {
+        time_t now = time(NULL);
+        struct tm * ti = localtime(&now);
+        if(ti) {
+            int w = (ti->tm_wday >= 0 && ti->tm_wday < 7) ? ti->tm_wday : 0;
+            lv_label_set_text_fmt(s_lbl_date, "%02d / %02d / %04d",
+                                  ti->tm_mon + 1, ti->tm_mday, ti->tm_year + 1900);
+            lv_label_set_text_fmt(s_lbl_time_str, "%s  %02d:%02d",
+                                  wd[w], ti->tm_hour, ti->tm_min);
+        }
+    }
 }
 
 static void tab_key_a_cb(lv_event_t * e)
@@ -119,6 +153,13 @@ static void tab_key_b_cb(lv_event_t * e)
 {
     if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     _ui_screen_change(&ui_settings, LV_SCR_LOAD_ANIM_FADE_ON, 350, 0, &ui_settings_screen_init);
+}
+
+static void tab_bootloader_cb(lv_event_t * e)
+{
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+    esp_restart();
 }
 
 static void tab_reboot_cb(lv_event_t * e)
@@ -749,31 +790,34 @@ static void build_tab_system(lv_obj_t * page)
     mk_outline_btn(c_rb, CARD_INN - 90, 7, 90, 36, "Reboot", 0xBEE700, tab_reboot_cb);
     y += 66 + 8;
 
+    lv_obj_t * c_boot = mk_card(sc, y, 66);
+    mk_lbl(c_boot, "Flash Mode", 0, 0, TV_TEXT, &ui_font_name_14);
+    mk_lbl(c_boot, "ROM bootloader", 0, 30, TV_MUTED, &ui_font_name_14);
+    mk_outline_btn(c_boot, CARD_INN - 90, 7, 90, 36, "Flash", TV_ORANGE, tab_bootloader_cb);
+    y += 66 + 8;
+
     // ── STORAGE ──────────────────────────────────────────────────────────────
     mk_lbl(sc, "STORAGE", TAB_MARG, y, TV_MUTED, &ui_font_name_14);
     y += 20;
 
     {
-        uint64_t sd_total = (uint64_t)ui_sd_total_bytes();
-        uint64_t sd_used  = (uint64_t)ui_sd_used_bytes();
-        int sd_pct = (sd_total > 0) ? (int)((sd_used * 100ULL) / sd_total) : 0;
+        bool sd_ok = (ui_sd_present() != 0);
+        uint64_t sd_total = sd_ok ? (uint64_t)ui_sd_total_bytes() : 0;
         char sd_info[40];
-        if(sd_total == 0) {
+        if(!sd_ok || sd_total == 0) {
             lv_snprintf(sd_info, sizeof(sd_info), "not mounted");
         } else {
-            uint32_t u_mb = (uint32_t)(sd_used  / 1048576UL);
             uint32_t t_mb = (uint32_t)(sd_total / 1048576UL);
             if(t_mb >= 1024)
-                lv_snprintf(sd_info, sizeof(sd_info), "%u.%u / %u.%u GB",
-                            u_mb / 1024, (u_mb % 1024) * 10 / 1024,
+                lv_snprintf(sd_info, sizeof(sd_info), "%u.%u GB ready",
                             t_mb / 1024, (t_mb % 1024) * 10 / 1024);
             else
-                lv_snprintf(sd_info, sizeof(sd_info), "%u / %u MB", u_mb, t_mb);
+                lv_snprintf(sd_info, sizeof(sd_info), "%u MB ready", t_mb);
         }
 
         lv_obj_t * c_sd = mk_card(sc, y, 68);
         mk_lbl(c_sd, "SD Card", 0, 0, TV_TEXT, &ui_font_name_14);
-        mk_bar(c_sd, 0, 20, CARD_INN, sd_pct, TV_ORANGE);
+        mk_bar(c_sd, 0, 20, CARD_INN, (sd_ok && sd_total > 0) ? 100 : 0, TV_ORANGE);
         {
             lv_obj_t * l = lv_label_create(c_sd);
             lv_label_set_text(l, sd_info);
@@ -792,12 +836,16 @@ static void build_tab_system(lv_obj_t * page)
 
     {
         nvs_stats_t nst = {};
-        nvs_get_stats(NULL, &nst);   /* NULL = default NVS partition */
-        int nvs_pct = (nst.total_entries > 0)
+        esp_err_t err = nvs_get_stats("nvs", &nst);
+        int nvs_pct = (err == ESP_OK && nst.total_entries > 0)
                       ? (int)((nst.used_entries * 100u) / nst.total_entries) : 0;
         char nvs_info[40];
-        lv_snprintf(nvs_info, sizeof(nvs_info), "%u / %u entries",
-                    (unsigned)nst.used_entries, (unsigned)nst.total_entries);
+        if (err == ESP_OK && nst.total_entries > 0) {
+            lv_snprintf(nvs_info, sizeof(nvs_info), "%u / %u entries",
+                        (unsigned)nst.used_entries, (unsigned)nst.total_entries);
+        } else {
+            lv_snprintf(nvs_info, sizeof(nvs_info), "NVS ready");
+        }
 
         lv_obj_t * c_nvs = mk_card(sc, y, 68);
         mk_lbl(c_nvs, "NVS Config", 0, 0, TV_TEXT, &ui_font_name_14);

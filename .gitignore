@@ -16,7 +16,13 @@ Thumbs.db
 # Local release artifacts
 dist/
 output/
+build/
 upload-log.txt
+*.bak
+scratch/
+
+# Separate SD Payloads repository
+sd files/
 
 # Local project documentation (published separately)
 docs/

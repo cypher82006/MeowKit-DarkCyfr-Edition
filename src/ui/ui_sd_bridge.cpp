@@ -28,12 +28,15 @@ extern "C" int ui_sd_present(void)
 
 extern "C" uint64_t ui_sd_total_bytes(void)
 {
-    return SD_MMC.totalBytes();
+    if (!ui_sd_present()) return 0;
+    return SD_MMC.cardSize();
 }
 
 extern "C" uint64_t ui_sd_used_bytes(void)
 {
-    return SD_MMC.usedBytes();
+    /* Returning 0 safely avoids SD_MMC.usedBytes() / f_getfree() which scans
+     * the entire FAT32 cluster table synchronously and triggers a TWDT reboot. */
+    return 0;
 }
 
 extern "C" int ui_sd_list_dir(const char* path, ui_sd_visit_cb cb, void* user)

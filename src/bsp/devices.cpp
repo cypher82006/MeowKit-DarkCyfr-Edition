@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file 
  * @author 
  * @brief 
@@ -51,8 +51,8 @@ bool DEVICES::init()
     gpio_set_direction((gpio_num_t)HAL_PIN_LCD_BL, GPIO_MODE_OUTPUT);
     gpio_set_level((gpio_num_t)HAL_PIN_LCD_BL, 1);
 
-    /* Serial — wait for monitor to connect */
-    Serial.begin(9600);
+    /* Serial — 115200 baud standard */
+    Serial.begin(115200);
     delay(300);
 
     /* I2C bus */

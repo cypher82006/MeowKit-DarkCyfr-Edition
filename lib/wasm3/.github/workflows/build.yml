@@ -1,0 +1,1127 @@
+name: build
+
+on:
+  push:
+    branches:
+    - "**"
+    tags:
+    - "v*.*.*"
+    # Note: path filters are not evaluated for tag pushes, so a release always builds
+    paths-ignore: ['**.md', '**.svg', '**.png']
+  pull_request:
+    paths-ignore: ['**.md', '**.svg', '**.png']
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    name: linux-${{ matrix.config.target }}
+    timeout-minutes: ${{ matrix.config.timeout || 10 }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+        - {target: clang,             cc: clang,  specflags: --no-relax-nan   }
+        - {target: clang-x86,         cc: clang,      cflags: -m32,   install: "gcc-multilib"   }
+        - {target: gcc,               cc: gcc,    skipfeat: tail-call   }
+        #- {target: gcc-x86,          cc: gcc,        cflags: -m32,   install: "gcc-multilib"   }
+        # The default configuration (typed function references are opt-in)
+        - {target: clang-no-typed-refs, cc: clang,  typedrefs: "0",  skipfeat: typed-refs   }
+        # Builds without uvwasi
+        - {target: gcc-no-uvwasi,     cc: gcc,    flags: -DBUILD_WASI=simple,  skipfeat: tail-call   }
+        - {target: clang-no-uvwasi,   cc: clang,  flags: -DBUILD_WASI=simple   }
+        # The deterministic profile, which also turns on canonical NaNs + simple WASI implementation
+        - {target: clang-determ,      cc: clang,  flags: -DBUILD_WASI=simple,  cflags: -Dd_m3DeterministicProfile=1 }
+        # TinyCC has no musttail, and no bswap builtins, which turns into an error under -Werror
+        - {target: tcc,               cc: tcc,    flags: -DBUILD_WASI=simple,  install: tcc,  artifact: dev-wasm3-tcc-linux-x64, werror: OFF, skipfeat: tail-call }
+        # Debug builds under ASan + UBSan
+        - {target: clang-sanitize,    cc: clang,  flags: -DCMAKE_BUILD_TYPE=Debug -DBUILD_WASI=simple, timeout: 15, cflags: "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer", ldflags: "-fsanitize=address,undefined" }
+        - {target: gcc-sanitize,      cc: gcc,    flags: -DCMAKE_BUILD_TYPE=Debug -DBUILD_WASI=simple, timeout: 15, cflags: "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer", ldflags: "-fsanitize=address,undefined", skipfeat: tail-call }
+        # GCC 16.2 build (static, linked against musl)
+        - {target: gcc-musl,          install: gcc-musl,   ldflags: "-static -s", artifact: dev-wasm3-gcc-linux-x64 }
+        # Clang builds (static, linked against musl)
+        - {target: clang-musl,        install: clang-musl, ldflags: "-static -s", artifact: wasm3-linux-x64 }
+        - {target: clang-musl-strace, install: clang-musl, ldflags: "-static -s", artifact: wasm3-strace-linux-x64, notest: true, strace: true, cflags: "-DDEBUG -Dd_m3EnableStrace=2 -Dd_m3RecordBacktraces=1" }
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install ${{ matrix.config.install }} toolchain
+      if: ${{ matrix.config.install }}
+      env:
+        GCC_MUSL_URL:
+          https://github.com/cross-tools/musl-cross/releases/download/20260823/x86_64-unknown-linux-musl.tar.xz
+        CLANG_MUSL_URL:
+          https://github.com/cross-tools/clang-cross/releases/download/20260823/x86_64-unknown-linux-musl.tar.xz
+      run: |
+        mkdir -p .toolchains
+        if [ "${{ matrix.config.install }}" = "gcc-musl" ]; then
+          wget -qO- ${GCC_MUSL_URL} | tar xJ -C .toolchains
+          echo "TOOLCHAIN_ARGS=-DCMAKE_TOOLCHAIN_FILE=${GITHUB_WORKSPACE}/.toolchains/x86_64-unknown-linux-musl/toolchain.cmake" >> $GITHUB_ENV
+        elif [ "${{ matrix.config.install }}" = "clang-musl" ]; then
+          wget -qO- ${CLANG_MUSL_URL} | tar xJ -C .toolchains
+          echo "TOOLCHAIN_ARGS=-DCMAKE_C_COMPILER=${GITHUB_WORKSPACE}/.toolchains/x86_64-unknown-linux-musl/bin/x86_64-unknown-linux-musl-clang" >> $GITHUB_ENV
+        else
+          sudo apt update
+          sudo apt install -y ${{ matrix.config.install }}
+        fi
+    - name: Configure
+      env:
+        CC: ${{ matrix.config.cc }}
+        CFLAGS: -Dd_m3HasTypedRefs=${{ matrix.config.typedrefs || '1' }} ${{ matrix.config.cflags }}
+        LDFLAGS: ${{ matrix.config.ldflags }}
+      run: |
+        mkdir build
+        cd build
+        cmake ${TOOLCHAIN_ARGS} -DBUILD_TESTS=ON -DBUILD_WERROR=${{ matrix.config.werror || 'ON' }} ${{ matrix.config.flags }} ..
+    - name: Build
+      run: |
+        cmake --build build
+        ./build/wasm3 --version
+    - name: Prepare artifact
+      if: ${{ matrix.config.artifact }}
+      run: cp ./build/wasm3 ./${{ matrix.config.artifact }}.elf
+    - name: Upload artifact
+      if: ${{ matrix.config.artifact }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ matrix.config.artifact }}
+        path: ./${{ matrix.config.artifact }}.elf
+        if-no-files-found: error
+    - name: Test embedding API
+      if: ${{ !matrix.config.notest }}
+      run: |
+        ./build/m3_test
+        ./build/m3_test_reftypes
+    - name: Test regression cases
+      if: ${{ !matrix.config.notest }}
+      run: cd test && python3 run-regression-test.py
+    - name: Test WebAssembly spec
+      if: ${{ !matrix.config.notest }}
+      run: |
+        cd test
+        python3 run-spec-test.py --skip-features=${{ matrix.config.skipfeat || 'none' }} ${{ matrix.config.specflags }}
+    - name: Test previous WebAssembly spec versions
+      if: ${{ !matrix.config.notest }}
+      run: |
+        cd test
+        python3 run-spec-test.py --spec=wg-2.0 --skip-features=${{ matrix.config.skipfeat || 'none' }} ${{ matrix.config.specflags }}
+    - name: Test WASI apps
+      if: ${{ !matrix.config.notest }}
+      run: cd test && python3 run-wasi-test.py --fast
+    - name: Test snapshots
+      # snapshots need stack switching, which needs typed references
+      if: ${{ !matrix.config.notest && matrix.config.typedrefs != '0' }}
+      run: cd test && python3 run-snapshot-test.py --legs 12 --verify
+    - name: Test strace output
+      if: ${{ matrix.config.strace }}
+      run: cd test && python3 run-strace-test.py
+
+  # A snapshot is written in Wasm's terms, so one build's snapshot has to resume in
+  # another that lays its state out differently. Each program here is suspended
+  # twice and resumed twice: on x64 with 64-bit slots, then on 32-bit big-endian
+  # PowerPC with 32-bit slots under QEMU, then back on x64 to the end - a change of
+  # byte order, pointer width and slot width each way.
+  #
+  # The sanitized leg runs the same programs under ASan + UBSan on x64. It is also
+  # the only x64 build here without guarded memory, which refuses pages smaller than
+  # the system's, so it is where the format tests of one-byte pages run. The ppc32
+  # toolchain ships no sanitizer runtimes, so that side takes UBSan in trap mode.
+  snapshots:
+    runs-on: ubuntu-latest
+    name: snapshots-${{ matrix.config.target }}
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+        - {target: default }
+        - {target: sanitize, flags: -DCMAKE_BUILD_TYPE=Debug -DBUILD_WASI=simple, cflags: "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer", ldflags: "-fsanitize=address,undefined", crossflags: "-fsanitize=undefined -fsanitize-trap=undefined" }
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Install QEMU
+      run: |
+        sudo apt update
+        sudo apt install -y qemu-user-static
+    - name: Build x64
+      run: |
+        cmake -S . -B build -DBUILD_TESTS=ON -DBUILD_WERROR=ON ${{ matrix.config.flags }} \
+          -DCMAKE_C_FLAGS="-Dd_m3Use32BitSlots=0 ${{ matrix.config.cflags }}" \
+          -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.config.ldflags }}"
+        cmake --build build
+    - name: Test snapshot format
+      working-directory: test
+      run: python3 run-snapshot-format-test.py
+    - name: Build ppc32
+      env:
+        CFLAGS: ${{ matrix.config.crossflags }}
+      run: python3 build-cross.py --target linux-ppc --build
+    - name: Suspend and resume across builds
+      working-directory: test
+      run: |
+        python3 run-snapshot-test.py --legs 3 --forks 0 --verify \
+          --exec ../build/wasm3 --exec-other "qemu-ppc-static ../build-cross/wasm3-linux-ppc"
+
+  alpine-multiarch:
+    runs-on: ubuntu-latest
+    name: alpine-${{ matrix.arch }}
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64]
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Setup multiarch/qemu-user-static
+      if: matrix.arch != 'amd64'
+      run: docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+    - name: Run tests
+      run: |
+        docker run --rm -i                                          \
+          --volume="${{ github.workspace }}:/work" --workdir=/work  \
+          ${{ matrix.arch }}/alpine:3.24 sh -s <<'EOF'
+        set -e
+        apk add --no-cache build-base cmake python3 git linux-headers
+        echo "------------ Build Wasm3 ------------"
+        mkdir build && cd build && cmake -DBUILD_TESTS=ON -DBUILD_WERROR=ON .. && cd ..
+        cmake --build build
+        echo "------------ Run tests ------------"
+        ./build/m3_test
+        ./build/m3_test_reftypes
+        # this is the default configuration - no typed refs, and whichever tail
+        # call support the distro's GCC has - so the features are detected here
+        cd test && python3 run-regression-test.py && cd ..
+        cd test && python3 run-spec-test.py && cd ..
+        cd test && python3 run-spec-test.py --spec=wg-2.0 && cd ..
+        cd test && python3 run-wasi-test.py --fast && cd ..
+        echo "-------- All tests finished -------"
+        EOF
+
+  macos:
+    runs-on: ${{ matrix.config.os }}
+    name: macos-${{ matrix.config.target }}
+    timeout-minutes: ${{ matrix.config.timeout || 10 }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+        # Clang has musttail and the CFLAGS below turn typed refs on, so every
+        # configuration here is expected to report every build feature
+        - {target: arm64-uvwasi,      os: macos-latest,   }
+        - {target: arm64-no-uvwasi,   os: macos-latest,   flags: -DBUILD_WASI=simple   }
+        - {target: intel-uvwasi,      os: macos-15-intel, }
+        - {target: intel-no-uvwasi,   os: macos-15-intel, flags: -DBUILD_WASI=simple   }
+        # Debug build under ASan + UBSan (memory guard is off as it interferes with sanitizer on macOS)
+        - {target: arm64-sanitize,    os: macos-latest,   flags: -DCMAKE_BUILD_TYPE=Debug -DBUILD_WASI=simple, timeout: 15, cflags: "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -Dd_m3GuardedMemory=0", ldflags: "-fsanitize=address,undefined" }
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Configure
+      env:
+        CFLAGS: ${{ matrix.config.cflags }}
+        LDFLAGS: ${{ matrix.config.ldflags }}
+      run: |
+        mkdir build
+        cd build
+        cmake -DBUILD_TESTS=ON -DBUILD_WERROR=ON ${{ matrix.config.flags }} ..
+    - name: Build
+      run: |
+        cmake --build build
+    - name: Test embedding API
+      run: |
+        ./build/m3_test
+        ./build/m3_test_reftypes
+    - name: Test regression cases
+      run: cd test && python3 run-regression-test.py
+    - name: Test WebAssembly spec
+      run: |
+        cd test
+        python3 run-spec-test.py --skip-features=none
+    - name: Test previous WebAssembly spec versions
+      run: |
+        cd test
+        python3 run-spec-test.py --spec=wg-2.0 --skip-features=none
+    - name: Test WASI apps
+      run: cd test && python3 run-wasi-test.py --fast
+
+  windows:
+    runs-on: ${{ matrix.config.os }}
+    name: windows-${{ matrix.config.target }}
+    timeout-minutes: ${{ matrix.config.timeout || 10 }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+        - {target: clang-x64,             os: windows-latest, platform: "-A x64",     toolset: "-T ClangCL",  ldflags: -s,  artifact: wasm3-win-x64   }
+        - {target: msvc-x64,              os: windows-latest, platform: "-A x64",     toolset: "",            skipfeat: tail-call   }
+        - {target: clang-x86,             os: windows-latest, platform: "-A Win32",   toolset: "-T ClangCL",  ldflags: -s,  artifact: wasm3-win-x86   }
+        - {target: msvc-x86,              os: windows-latest, platform: "-A Win32",   toolset: "",            skipfeat: tail-call   }
+        - {target: msvc-arm64,            os: windows-11-arm, platform: "-A ARM64",   toolset: "",            skipfeat: tail-call   }
+        # Builds without uvwasi
+        - {target: clang-x64-no-uvwasi,   os: windows-latest, platform: "-A x64",     toolset: "-T ClangCL",  flags: "-DBUILD_WASI=simple"   }
+        - {target: msvc-x64-no-uvwasi,    os: windows-latest, platform: "-A x64",     toolset: "",            flags: "-DBUILD_WASI=simple",  skipfeat: tail-call   }
+        - {target: clang-x86-no-uvwasi,   os: windows-latest, platform: "-A Win32",   toolset: "-T ClangCL",  flags: "-DBUILD_WASI=simple"   }
+        - {target: msvc-x86-no-uvwasi,    os: windows-latest, platform: "-A Win32",   toolset: "",            flags: "-DBUILD_WASI=simple",  skipfeat: tail-call   }
+        - {target: msvc-arm64-no-uvwasi,  os: windows-11-arm, platform: "-A ARM64",   toolset: "",            flags: "-DBUILD_WASI=simple",  skipfeat: tail-call   }
+        # Debug build under ASan. Windows ships no UBSan. Default Debug flags carry /RTC1 and /INCREMENTAL, and ASan runs with neither
+        - {target: msvc-x64-sanitize,     os: windows-latest, platform: "-A x64",     toolset: "",            buildtype: Debug, timeout: 15, sanitize: true, skipfeat: tail-call, flags: '-DBUILD_WASI=simple -DCMAKE_C_FLAGS_DEBUG="/Zi /Ob0 /Od" -DCMAKE_EXE_LINKER_FLAGS_DEBUG="/debug /INCREMENTAL:NO"', cflags: "/fsanitize=address" }
+        # Release build with strace
+        - {target: clang-x64-strace,      os: windows-latest, platform: "-A x64",     toolset: "-T ClangCL",  ldflags: -s,  artifact: wasm3-strace-win-x64, notest: true, strace: true, cflags: "-DDEBUG -Dd_m3EnableStrace=2 -Dd_m3RecordBacktraces=1" }
+
+    defaults:
+      run:
+        shell: cmd
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Configure
+      env:
+        CFLAGS: ${{ matrix.config.cflags }}
+        LDFLAGS: ${{ matrix.config.ldflags }}
+      run: |
+        mkdir build
+        cd build
+        cmake ${{ matrix.config.platform }} ${{ matrix.config.toolset }} -DBUILD_TESTS=ON -DBUILD_WERROR=ON ${{ matrix.config.flags }} ..
+    - name: Build
+      run: |
+        cmake --build build --config ${{ matrix.config.buildtype || 'Release' }}
+        cp ./build/${{ matrix.config.buildtype || 'Release' }}/wasm3.exe ./build/
+    - name: Provide the ASan runtime
+      if: ${{ matrix.config.sanitize }}
+      shell: pwsh
+      # MSVC links ASan dynamically in every configuration, and the runtime DLLs sit
+      # in the toolchain directory, which is not on PATH outside a developer prompt.
+      # Which one a binary needs depends on the CRT it was built against, so take
+      # them all rather than guess, newest toolchain last so it wins.
+      run: |
+        $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+        $dlls = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter "clang_rt.asan*.dll" | Sort-Object FullName
+        if (-not $dlls) { throw "No ASan runtime under $vs" }
+        foreach ($dll in $dlls) {
+          Write-Host $dll.FullName
+          Copy-Item $dll.FullName build\
+          Copy-Item $dll.FullName build\${{ matrix.config.buildtype }}\
+        }
+    - name: Prepare artifact
+      if: ${{ matrix.config.artifact }}
+      run: cp ./build/${{ matrix.config.buildtype || 'Release' }}/wasm3.exe ./${{ matrix.config.artifact }}.exe
+    - name: Upload artifact
+      if: ${{ matrix.config.artifact }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ matrix.config.artifact }}
+        path: ./${{ matrix.config.artifact }}.exe
+        if-no-files-found: error
+    - name: Test embedding API
+      if: ${{ !matrix.config.notest }}
+      run: build\${{ matrix.config.buildtype || 'Release' }}\m3_test.exe
+    - name: Test embedding API (reference types)
+      if: ${{ !matrix.config.notest }}
+      run: build\${{ matrix.config.buildtype || 'Release' }}\m3_test_reftypes.exe
+    - name: Test regression cases
+      if: ${{ !matrix.config.notest }}
+      run: |
+        cd test
+        python run-regression-test.py
+    - name: Test WebAssembly spec
+      if: ${{ !matrix.config.notest }}
+      run: |
+        cd test
+        python run-spec-test.py --skip-features=${{ matrix.config.skipfeat || 'none' }}
+    - name: Test previous WebAssembly spec versions
+      if: ${{ !matrix.config.notest }}
+      run: |
+        cd test
+        python run-spec-test.py --spec=wg-2.0 --skip-features=${{ matrix.config.skipfeat || 'none' }}
+    - name: Test WASI apps
+      if: ${{ !matrix.config.notest }}
+      run: |
+        cd test
+        python run-wasi-test.py --fast
+    - name: Test strace output
+      if: ${{ matrix.config.strace }}
+      run: |
+        cd test
+        python run-strace-test.py
+
+  cygwin-build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        # a login shell to pick up Cygwin's own PATH, and igncr because the checkout
+        # lands with the line endings Git for Windows gives it
+        shell: C:\tools\cygwin\bin\bash.exe --login --norc -eo pipefail -o igncr '{0}'
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Cygwin
+      uses: egor-tensin/setup-cygwin@v4
+      with:
+        packages: make gcc-g++ cmake python3
+    # the one job that configures in the source directory, so the binary lands at
+    # the top level rather than under build/
+    - name: Build
+      run: cd $GITHUB_WORKSPACE && cmake -DBUILD_TESTS=ON -DBUILD_WASI=simple . && make
+    - name: Test embedding API
+      run: |
+        cd $GITHUB_WORKSPACE
+        ./m3_test
+        ./m3_test_reftypes
+    - name: Test regression cases
+      run: cd $GITHUB_WORKSPACE/test && python3 run-regression-test.py --exec ../wasm3
+    # the features stay on auto: which of them this build has depends on the GCC
+    # that Cygwin happens to ship
+    - name: Test WebAssembly spec
+      run: cd $GITHUB_WORKSPACE/test && python3 run-spec-test.py --exec "../wasm3 --spec-repl"
+    - name: Test WASI apps
+      run: cd $GITHUB_WORKSPACE/test && python3 run-wasi-test.py --fast --exec ../wasm3
+
+  #
+  # Cross-compiled builds. build-cross.py owns the toolchain matrix, so the
+  # target list comes from it rather than being duplicated here.
+  #
+
+  cross-targets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+
+    steps:
+    - uses: actions/checkout@v7
+    - id: list
+      run: echo "targets=$(python3 build-cross.py --list --nowasi)" >> $GITHUB_OUTPUT
+
+  cross:
+    runs-on: ubuntu-latest
+    name: cross-${{ matrix.target.name }}
+    # more than cross-qemu needs: a full cmake build with uvwasi, then both the spec
+    # and WASI suites under emulation
+    timeout-minutes: 15
+
+    needs: cross-targets
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.cross-targets.outputs.targets) }}
+
+    env:
+      # the built binary under the emulator its architecture needs, as the harnesses
+      # take it: one string, named from the directory they run in
+      WASM3: ${{ matrix.target.runner }} ../build-cross/wasm3-${{ matrix.target.name }}
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Install QEMU
+      run: |
+        sudo apt update
+        sudo apt install -y qemu-user-static
+    # a few targets have no cross toolchain to download, so they use the distro's
+    - name: Install ${{ matrix.target.apt }}
+      if: ${{ matrix.target.apt }}
+      run: sudo apt install -y ${{ matrix.target.apt }}
+    # build-cross.py owns the toolchains, so the build goes through it. The suites
+    # are run here rather than through its --test, so that which of them failed - and
+    # how far it got before it did - is on the job page rather than in a log the
+    # script wrote and nothing kept.
+    - name: Build
+      run: python3 build-cross.py --target ${{ matrix.target.name }} --build
+    # the regression cases run first: they are the quickest of the three, and they
+    # hold the memory64/table64 address-wrap tests, which is what the 32-bit targets
+    # here are most likely to get wrong
+    - name: Test regression cases
+      working-directory: test
+      run: python3 run-regression-test.py --exec "$WASM3"
+    - name: Test WebAssembly spec
+      working-directory: test
+      run: python3 run-spec-test.py --exec "$WASM3 --spec-repl"
+    - name: Test WASI apps
+      working-directory: test
+      run: python3 run-wasi-test.py --fast --exec "$WASM3"
+    # The variants that only exist to exercise a build option or an ABI are tested
+    # like the rest, but nothing collects them for the release
+    - name: Upload artifact
+      if: ${{ matrix.target.dist }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: cross-${{ matrix.target.name }}
+        path: build-cross/wasm3-${{ matrix.target.name }}
+        if-no-files-found: error
+
+  wasi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Setup environment
+      env:
+        WASI_VERSION: 34
+        WASI_VERSION_FULL: "34.0"
+      run: |
+        echo "WASI_VERSION=${WASI_VERSION}" >> $GITHUB_ENV
+        echo "WASI_VERSION_FULL=${WASI_VERSION_FULL}" >> $GITHUB_ENV
+        echo "WASI_SDK_PATH=${GITHUB_WORKSPACE}/.toolchains/wasi-sdk-${WASI_VERSION_FULL}-x86_64-linux" >> $GITHUB_ENV
+    - name: Install WASI SDK
+      run: |
+        mkdir -p .toolchains
+        cd .toolchains
+        WASI_TAR=wasi-sdk-${WASI_VERSION_FULL}-x86_64-linux.tar.gz
+        wget https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_VERSION}/${WASI_TAR}
+        tar xf ${WASI_TAR}
+    # The Wasm build emits tail calls, so it needs a host that supports the proposal.
+    # Wasmtime enables it by default; Wasmer needs --enable-tail-call and, as of 7.x,
+    # can no longer open the test files through a preopened directory.
+    - name: Install Wasmtime
+      run: curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version v48.0.1
+    - name: Configure
+      run: |
+        mkdir build-wasi
+        cd build-wasi
+        cmake -DCMAKE_TOOLCHAIN_FILE="${WASI_SDK_PATH}/share/cmake/wasi-sdk-p1.cmake" -DWASI_SDK_PREFIX="${WASI_SDK_PATH}" ..
+    - name: Build
+      run: |
+        cmake --build build-wasi
+        cp ./build-wasi/wasm3.wasm ./test/
+        cp ./build-wasi/wasm3.wasm ./wasm3-wasi.wasm
+    - name: Upload artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: wasm3-wasi
+        path: ./wasm3-wasi.wasm
+        if-no-files-found: error
+    # max-wasm-stack is raised so that Wasm3's own stack limit is what a runaway guest
+    # hits first -- the same reason the self-hosting steps below pass --stack-size
+    - name: Test WebAssembly spec (in Wasmtime)
+      run: |
+        export PATH="$HOME/.wasmtime/bin:$PATH"
+        cd test
+        python3 run-spec-test.py --skip-features=none --exec "wasmtime run -W max-wasm-stack=4194304 --dir ./::./ wasm3.wasm --spec-repl"
+    - name: Test WASI apps (in Wasmtime)
+      run: |
+        export PATH="$HOME/.wasmtime/bin:$PATH"
+        cd test
+        python3 run-wasi-test.py --exec "wasmtime run -W max-wasm-stack=4194304 --dir ./::./ wasm3.wasm" --fast
+
+    # Clang, because the guest here is wasm3.wasm itself: it's full of return_call, and
+    # replaying those iteratively needs a host built with musttail
+    - name: Configure (native)
+      run: |
+        mkdir build
+        cd build
+        cmake -DCMAKE_C_COMPILER=clang -DBUILD_WERROR=ON ..
+    - name: Build (native)
+      run: |
+        cmake --build build
+    - name: Test WebAssembly spec (in Wasm3, self-hosting)
+      run: |
+        cd test
+        python3 run-spec-test.py --skip-features=none --exec "../build/wasm3 --stack-size 2097152 wasm3.wasm --spec-repl"
+    - name: Test WASI apps (in Wasm3, self-hosting)
+      run: |
+        cd test
+        python3 run-wasi-test.py --fast --exec "../build/wasm3 --stack-size 2097152 wasm3.wasm"
+
+    - name: Configure, Build wasm3-strace
+      env:
+        CFLAGS: -DDEBUG -Dd_m3EnableStrace=2 -Dd_m3RecordBacktraces=1
+      run: |
+        mkdir build-strace
+        cd build-strace
+        cmake -DCMAKE_TOOLCHAIN_FILE="${WASI_SDK_PATH}/share/cmake/wasi-sdk-p1.cmake" -DWASI_SDK_PREFIX="${WASI_SDK_PATH}" ..
+        cmake --build .
+        cp ./wasm3.wasm ../wasm3-strace.wasm
+        cp ./wasm3.wasm ../test/wasm3-strace.wasm
+    - name: Test strace output (in Wasmtime)
+      run: |
+        export PATH="$HOME/.wasmtime/bin:$PATH"
+        cd test
+        python3 run-strace-test.py --exec "wasmtime run -W max-wasm-stack=4194304 --dir ./::./ wasm3-strace.wasm"
+    - name: Upload artifact (strace)
+      uses: actions/upload-artifact@v7
+      with:
+        name: wasm3-strace-wasi
+        path: ./wasm3-strace.wasm
+        if-no-files-found: error
+
+  emscripten:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+    - uses: actions/checkout@v7
+    # deliberately not pinned: this configuration went years without being built,
+    # and following current Emscripten is what keeps it from drifting again
+    - name: Set up Emscripten
+      uses: emscripten-core/setup-emsdk@v16
+    # the app has fib32.wasm compiled into it and reports fib(40), so running it
+    # needs no filesystem
+    - name: Build and run the app
+      run: |
+        mkdir build
+        cd build
+        cmake -DEMSCRIPTEN=1 ..
+        cmake --build .
+        node wasm3.js | tee out.txt
+        grep -q "Result: 102334155" out.txt
+    - name: Build and run the library
+      run: |
+        mkdir build-lib
+        cd build-lib
+        cmake -DEMSCRIPTEN_LIB=1 ..
+        cmake --build .
+        node ../platforms/emscripten_lib/run_wasm3.js ../test/lang/fib32.wasm fib 24 | tee out.txt
+        grep -q "Result: 46368" out.txt
+
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Show selected Xcode
+      run: |
+        xcodebuild -version
+        xcode-select -p
+        ls /Applications | grep Xcode
+    - name: Build
+      run: |
+        cd platforms/ios
+        xcodebuild build -scheme wasm3 -project wasm3.xcodeproj -configuration Release -destination "generic/platform=iOS Simulator"
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up JDK 17
+      uses: actions/setup-java@v5
+      with:
+        distribution: zulu
+        java-version: 17
+    - name: Build
+      run: |
+        cd platforms/android
+        ./gradlew build
+    - name: Copy
+      run: |
+        cp ./platforms/android/app/build/outputs/apk/debug/app-debug.apk ./wasm3-android-coremark.apk
+    - name: Upload artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: wasm3-android-coremark
+        path: ./wasm3-android-coremark.apk
+        if-no-files-found: error
+
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+      with:
+        path: wasm3
+    - name: Checkout pywasm3
+      uses: actions/checkout@v7
+      with:
+        repository: wasm3/pywasm3
+        path: pywasm3
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: 3.x
+    - name: Update and Build Python module
+      run: |
+        rm -rf ./pywasm3/external/wasm3
+        cp -r wasm3 ./pywasm3/external/wasm3
+        pip install ./pywasm3
+    - name: Test
+      run: |
+        pip install pytest
+        cd ./pywasm3
+        pytest
+
+  cosmopolitan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+    - uses: actions/checkout@v7
+    # The cosmocc toolchain is itself made of APE binaries, so teach the kernel
+    # how to run them before building
+    - name: Register APE interpreter
+      run: sudo sh -c "echo ':APE:M::MZqFpD::/bin/sh:' >/proc/sys/fs/binfmt_misc/register"
+    - name: Build αcτµαlly pδrταblε εxεcµταblε
+      run: |
+        cd platforms/cosmopolitan
+        ./build.sh
+        cp ./wasm3.com ../../wasm3-cosmopolitan.com
+        cp ./wasm3.com.dbg ../../wasm3-cosmopolitan.com.dbg
+    - name: Upload artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: wasm3-cosmopolitan
+        path: |
+          ./wasm3-cosmopolitan.com
+          ./wasm3-cosmopolitan.com.dbg
+        if-no-files-found: error
+
+  # The published APE is meant to run everywhere, so take that exact file
+  # and exercise it on the other operating systems
+  cosmopolitan-test:
+    runs-on: ${{ matrix.config.os }}
+    name: cosmopolitan-${{ matrix.config.target }}
+    timeout-minutes: 20
+
+    needs: cosmopolitan
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+        - {target: linux,   os: ubuntu-latest,  python: python3, exec: "./wasm3.com"    }
+        - {target: windows, os: windows-latest, python: python,  exec: "./wasm3.com"    }
+        - {target: macos,   os: macos-latest,   python: python3, exec: "sh ./wasm3.com" }
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Download artifact
+      uses: actions/download-artifact@v7
+      with:
+        name: wasm3-cosmopolitan
+        path: test
+    - name: Register APE interpreter
+      if: ${{ matrix.config.target == 'linux' }}
+      run: sudo sh -c "echo ':APE:M::MZqFpD::/bin/sh:' >/proc/sys/fs/binfmt_misc/register"
+    - name: Prepare tests
+      run: |
+        cd test
+        mv ./wasm3-cosmopolitan.com ./wasm3.com
+        chmod +x ./wasm3.com    # the artifact archive doesn't keep the executable bit
+        ${{ matrix.config.exec }} --version
+    - name: Test regression cases
+      run: |
+        cd test
+        ${{ matrix.config.python }} run-regression-test.py --exec "${{ matrix.config.exec }}"
+    - name: Test WebAssembly spec
+      run: |
+        cd test
+        ${{ matrix.config.python }} run-spec-test.py --exec "${{ matrix.config.exec }} --spec-repl"
+    - name: Test previous WebAssembly spec versions
+      run: |
+        cd test
+        ${{ matrix.config.python }} run-spec-test.py --spec=wg-2.0 --exec "${{ matrix.config.exec }} --spec-repl"
+    - name: Test WASI apps
+      run: |
+        cd test
+        ${{ matrix.config.python }} run-wasi-test.py --fast --exec "${{ matrix.config.exec }}"
+
+  zig-native:
+    name: zig-native-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+            py: python3
+          - name: macos
+            os: macos-latest
+            py: python3
+          - name: windows
+            os: windows-latest
+            py: python
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build
+        run: zig build -Doptimize=ReleaseFast -Dbuild_wasi=simple
+      - name: Test WebAssembly spec
+        working-directory: test
+        run: ${{ matrix.py }} run-spec-test.py --exec "../zig-out/bin/wasm3 --spec-repl"
+      - name: Test WASI apps
+        working-directory: test
+        run: ${{ matrix.py }} run-wasi-test.py --fast --exec ../zig-out/bin/wasm3
+
+  zig-wasi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install Wasmtime
+        run: curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version v48.0.1
+      # Self-hosting tests are deferred until build.zig supports uvwasi.
+      # The CMake CI runs them against a uvwasi host, which the zig build cannot provide yet
+      - name: Build (wasm32-wasi, metawasi)
+        run: zig build -Doptimize=ReleaseFast -Dtarget=wasm32-wasi -Dbuild_wasi=metawasi
+      - name: Prepare wasm
+        run: |
+          cp zig-out/bin/wasm3.wasm ./test/wasm3.wasm
+          cp zig-out/bin/wasm3.wasm ./wasm3-wasi-zig.wasm
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm3-wasi-zig
+          path: ./wasm3-wasi-zig.wasm
+          if-no-files-found: error
+      - name: Test WebAssembly spec (in Wasmtime)
+        run: |
+          export PATH="$HOME/.wasmtime/bin:$PATH"
+          cd test
+          python3 run-spec-test.py --exec "wasmtime run -W max-wasm-stack=4194304 --dir ./::./ wasm3.wasm --spec-repl"
+      - name: Test WASI apps (in Wasmtime)
+        run: |
+          export PATH="$HOME/.wasmtime/bin:$PATH"
+          cd test
+          python3 run-wasi-test.py --fast --exec "wasmtime run -W max-wasm-stack=4194304 --dir ./::./ wasm3.wasm"
+
+  platformio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: 3.x
+    - name: Install PlatformIO
+      run: |
+        python -m pip install --upgrade pip
+        pip install --upgrade platformio
+    - name: Build AVR ATmega1284
+      run: |
+        cd platforms/embedded/arduino
+        pio run -e mega1284
+        ! nm .pio/build/mega1284/firmware.elf | grep printf
+    - name: Build ESP8266
+      run: |
+        cd platforms/embedded/arduino
+        pio run -e esp8266
+    - name: Build ESP32
+      run: |
+        cd platforms/embedded/arduino
+        pio run -e esp32
+
+  platformio-arm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: 3.x
+    - name: Install PlatformIO
+      run: |
+        python -m pip install --upgrade pip
+        pip install --upgrade platformio
+    - name: Build Arduino MKR1000
+      run: |
+        cd platforms/embedded/arduino
+        pio run -e mkr1000
+    - name: Build Blue Pill (JeeH)
+      run: |
+        cd platforms/embedded/bluepill
+        pio run
+    - name: Build TinyBLE
+      run: |
+        cd platforms/embedded/arduino
+        pio run -e tinyBLE
+    - name: Build MXChip AZ3166
+      run: |
+        cd platforms/embedded/arduino
+        pio run -e az3166
+
+  platformio-riscv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: 3.x
+    - name: Install PlatformIO
+      run: |
+        python -m pip install --upgrade pip
+        pip install --upgrade platformio
+    - name: Build HiFive1
+      run: |
+        cd platforms/embedded/hifive1
+        pio run
+    - name: Build Sipeed MAIX
+      run: |
+        cd platforms/embedded/arduino
+        pio run -e maix
+
+  particle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'push'
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Particle CLI
+      run: sudo npm install -g particle-cli
+    - name: Log in
+      env:
+        PARTICLE_TOKEN: ${{ secrets.PARTICLE_TOKEN }}
+      run: particle login --token $PARTICLE_TOKEN
+    - name: Build Photon
+      run: |
+        cd platforms/embedded/particle
+        particle compile --followSymlinks photon
+        particle compile --followSymlinks argon
+
+  esp-idf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Build for ESP32
+      run: |
+        docker run --rm -i                                          \
+          --volume="${{ github.workspace }}:/work" --workdir=/work  \
+          espressif/idf:release-v5.4 bash -s <<'EOF'
+        set -e
+        source /opt/esp/idf/export.sh
+        echo "------------ Build Wasm3 ------------"
+        cd platforms/embedded/esp32-idf
+        export EXTRA_CFLAGS="-Werror"
+        idf.py set-target esp32
+        idf.py -D CONFIG_ESPTOOLPY_FLASHFREQ_80M=y    \
+              -D CONFIG_ESPTOOLPY_FLASHFREQ=\"80m\"   \
+              -D CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y     \
+              -D CONFIG_ESPTOOLPY_FLASHSIZE=\"4MB\"   \
+              build
+        idf.py merge-bin -o flash-image.bin --fill-flash-size 4MB
+        chmod -R a+rX build
+        echo "------------ Build OK ---------------"
+        EOF
+    - name: Check flash image
+      run: |
+        cp platforms/embedded/esp32-idf/build/flash-image.bin .
+        head -c 128 flash-image.bin | hexdump -C
+        md5sum flash-image.bin
+    - name: Run in QEMU
+      uses: tobozo/esp32-qemu-sim@v2.1.0
+      with:
+        chip: esp32
+        flash-image: flash-image.bin
+        qemu-timeout: "60"
+        timeout-interrupt-regex: "Restarting..."
+    - name: Validate output
+      run: |
+        grep "Result: 46368" logs.txt
+        grep "Elapsed: " logs.txt
+        grep "Restarting..." logs.txt
+      # test $(($(grep "ets Jul 29 2019" logs.txt | wc -l))) -eq 1
+
+  cpp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Configure
+      run: |
+        cd platforms/cpp
+        mkdir build
+        cd build
+        cmake ..
+    - name: Build
+      run: |
+        cd platforms/cpp
+        cmake --build build
+    - name: Run
+      run: |
+        cd platforms/cpp/build
+        ./wasm3_cpp_example
+
+  as-cpp:
+    name: maintenance (build as C++)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Build
+      run: |
+        mkdir build
+        cd build
+        clang -xc++ -Werror -Dd_m3HasWASI \
+            -I../source ../source/*.c ../platforms/app/main.c \
+            -O3 -g0 -lm \
+            -o wasm3
+    - name: Test
+      run: ./build/wasm3 ./test/wasi/simple/test.wasm
+
+  with-logs:
+    name: maintenance (debug logs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Build
+      run: |
+        mkdir build
+        cd build
+        clang -xc++ -Werror -Dd_m3HasWASI -DDEBUG \
+            -Dd_m3EnableOpTracing=1     \
+            -Dd_m3EnableStrace=1        \
+            -Dd_m3LogParse=1            \
+            -Dd_m3LogModule=1           \
+            -Dd_m3LogCompile=1          \
+            -Dd_m3LogWasmStack=1        \
+            -Dd_m3LogEmit=1             \
+            -Dd_m3LogCodePages=1        \
+            -Dd_m3LogRuntime=1          \
+            -Dd_m3LogNativeStack=1      \
+            -Dd_m3RecordBacktraces=1    \
+            -I../source ../source/*.c ../platforms/app/main.c \
+            -O3 -g0 -lm \
+            -o wasm3
+    - name: Test
+      run: ./build/wasm3 ./test/wasi/simple/test.wasm > /dev/null
+
+  preprocessed-ops:
+    name: maintenance (preprocess ops)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Install sponge
+      run: |
+        sudo apt update
+        sudo apt install moreutils
+    - name: Build
+      run: |
+        make -f extra/utils.mk preprocess
+        mkdir build
+        cd build
+        gcc -Werror -Dd_m3HasWASI \
+            -I../source ../source/*.c ../platforms/app/main.c \
+            -O3 -g0 -lm \
+            -o wasm3
+    - name: Test
+      run: ./build/wasm3 ./test/wasi/simple/test.wasm
+
+  check-format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: 3.x
+    - name: Install tools
+      run: |
+        pip install --upgrade   \
+          codespell pyyaml      \
+          clang-format==23.1.0  \
+          black==26.1.0
+    - name: Spellcheck
+      if: always()
+      run: |
+        codespell
+    - name: Check formatting
+      if: always()
+      run: |
+        python3 extra/format.py --check
+
+  #
+  # Publish a release if the push was a tag that starts with "v"
+  #
+
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    needs:
+    - linux
+    - alpine-multiarch
+    - macos
+    - windows
+    - wasi
+    - cosmopolitan
+    - cosmopolitan-test
+    - android
+    - cross
+    - cpp
+    - python
+    - check-format
+
+    permissions:
+      contents: write
+
+    env:
+      draft: true
+
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v7
+      with:
+        path: dist
+        pattern: wasm3-*
+        merge-multiple: true
+
+      # The cross builds ship as one archive rather than 19 separate assets
+    - name: Download the cross-built binaries
+      uses: actions/download-artifact@v7
+      with:
+        path: build-cross
+        pattern: cross-*
+        merge-multiple: true
+
+    - name: Combine the cross builds into one archive
+      run: |
+        # an artifact archive doesn't keep the executable bit, so put it back
+        chmod +x build-cross/wasm3-linux-*
+        cd build-cross
+        tar -czvf ../dist/wasm3-linux-other.tar.gz wasm3-linux-*
+
+    - name: List artifacts
+      run: |
+        find dist -type f -maxdepth 2 -print
+
+    - name: Publish release
+      uses: softprops/action-gh-release@v3
+      with:
+        draft: ${{ env.draft }}
+        files: dist/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
