@@ -471,6 +471,17 @@ namespace MOONCAKE::APPS
         return 1;
     }
 
+    static int l_append_file(lua_State* L) {
+        const char* path = luaL_checkstring(L, 1);
+        const char* data = luaL_checkstring(L, 2);
+        File f = SD_MMC.open(path, FILE_APPEND);
+        if (!f) { lua_pushboolean(L, false); return 1; }
+        f.write((const uint8_t*)data, strlen(data));
+        f.close();
+        lua_pushboolean(L, true);
+        return 1;
+    }
+
     /* ── BLE AirTag / FindMy Beacon ── */
     static bool s_ble_airtag_active = false;
     static esp_ble_adv_params_t s_airtag_adv_params = {
@@ -812,6 +823,7 @@ namespace MOONCAKE::APPS
         lua_pushcfunction(L, l_adc_read);     lua_setfield(L, -2, "adc_read");
         lua_pushcfunction(L, l_read_file);    lua_setfield(L, -2, "read_file");
         lua_pushcfunction(L, l_write_file);   lua_setfield(L, -2, "write_file");
+        lua_pushcfunction(L, l_append_file);  lua_setfield(L, -2, "append_file");
         lua_pushcfunction(L, l_ble_airtag);   lua_setfield(L, -2, "ble_airtag");
         lua_pushcfunction(L, l_record_wav);   lua_setfield(L, -2, "record_wav");
         lua_pushcfunction(L, l_mic_level);    lua_setfield(L, -2, "mic_level");

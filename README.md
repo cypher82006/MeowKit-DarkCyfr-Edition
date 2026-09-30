@@ -91,6 +91,9 @@ Standard firmware architectures allocate runtime memory (Lua states, script text
 | `meow.ble_airtag(enable)` | `bool` | Toggle Apple FindMy / AirTag beacon emulation. |
 | `meow.record_wav(path, sec)` | `path, sec` | Record audio from dual microphone array into 16kHz WAV. |
 | `meow.mic_level()` | *none* | Returns instantaneous RMS microphone amplitude (0..100). |
+| `meow.read_file(path)` | `path` | Read text/binary content from MicroSD file as string. |
+| `meow.write_file(path, data)` | `path, data` | Write content to MicroSD file (overwriting existing). |
+| `meow.append_file(path, data)` | `path, data` | Append string data directly to MicroSD file. |
 
 ---
 
